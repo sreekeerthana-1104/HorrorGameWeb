@@ -31,14 +31,14 @@ public class HeadTear : MonoBehaviour
     [Range(0f, 1f)]
     public float headProximityMinWeight = 0.02f;
 
-    [Tooltip("Scene-level EMG bridge. A calibrated BioAmp squeeze is required before this head can tear.")]
+    [Tooltip("Scene-level EMG bridge. The head can tear only while the ESP32 two-second tear window is active.")]
     public EmgTearGate emgTearGate;
 
     private Rigidbody rb;
     private Grabbable grabbable;
     private bool isTorn = false;
     private bool isHeldAfterTear = false;
-    private bool loggedWaitingForEmg = false;
+    private bool loggedBlockedGrab = false;
     private ZombieChase cachedChase;
     private BloodDrip bloodDrip;
 
@@ -48,6 +48,17 @@ public class HeadTear : MonoBehaviour
         grabbable = GetComponent<Grabbable>();
         cachedChase = GetComponentInParent<ZombieChase>();
         bloodDrip = GetComponent<BloodDrip>();
+
+        // The zombie is a prefab while EmgTearBridge is scene-level, so the prefab
+        // cannot reliably keep a direct serialized reference to it. Find it at runtime.
+        if (emgTearGate == null)
+        {
+            emgTearGate = FindObjectOfType<EmgTearGate>();
+            if (emgTearGate == null)
+                Debug.LogError("[HeadTear] No active EmgTearGate found in this scene. Add EmgTearBridge with EmgTearGate.");
+            else
+                Debug.Log("[HeadTear] Automatically linked to scene EmgTearBridge.");
+        }
 
         if (rb != null) rb.isKinematic = true;
 
@@ -63,21 +74,22 @@ public class HeadTear : MonoBehaviour
             bool isBeingGrabbed = grabbable != null && grabbable.SelectingPointsCount > 0;
             if (isBeingGrabbed && emgTearGate != null && emgTearGate.CanTear)
             {
-                Debug.Log("[HeadTear] Grab + EMG squeeze detected -> tearing off.");
+                Debug.Log("[HeadTear] Grab + ESP32 tear window detected -> tearing off.");
                 TearOff();
             }
-            else if (isBeingGrabbed && emgTearGate != null && !emgTearGate.CanTear && !loggedWaitingForEmg)
+            else if (isBeingGrabbed && emgTearGate == null && !loggedBlockedGrab)
             {
-                loggedWaitingForEmg = true;
-                Debug.Log("[HeadTear] Grab was detected, but the two-second EMG tear window is currently closed.");
+                loggedBlockedGrab = true;
+                Debug.LogError("[HeadTear] Grab detected, but Emg Tear Gate is EMPTY. Drag EmgTearBridge into this HeadTear field.");
+            }
+            else if (isBeingGrabbed && emgTearGate != null && !emgTearGate.CanTear && !loggedBlockedGrab)
+            {
+                loggedBlockedGrab = true;
+                Debug.Log($"[HeadTear] Grab detected, but CanTear is false. EMG status: {emgTearGate.connectionStatus}");
             }
             else if (!isBeingGrabbed)
             {
-                loggedWaitingForEmg = false;
-            }
-            else if (isBeingGrabbed && emgTearGate == null)
-            {
-                Debug.LogWarning("[HeadTear] EMG gate is not assigned; head cannot tear.");
+                loggedBlockedGrab = false;
             }
             return;
         }

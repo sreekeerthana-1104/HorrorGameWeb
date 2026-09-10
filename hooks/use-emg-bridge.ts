@@ -8,6 +8,7 @@ type EmgMessage = {
   type: "emg" | "calibration" | "calibrationComplete" | "error";
   envelope?: number;
   armed?: boolean;
+  calibrated?: boolean;
   threshold?: number;
   baseline?: number;
   phase?: CalibrationPhase;
@@ -44,20 +45,28 @@ export function useEmgBridge(): EmgBridge {
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const offlineTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(false);
 
   const connect = useCallback(() => {
     shouldReconnectRef.current = true;
     if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    if (offlineTimerRef.current !== null) window.clearTimeout(offlineTimerRef.current);
     socketRef.current?.close();
     setError("");
     setConnected(false);
     try {
       const socket = new WebSocket(address.trim());
       socketRef.current = socket;
-      socket.onopen = () => { setConnected(true); setError(""); };
+      socket.onopen = () => {
+        if (offlineTimerRef.current !== null) window.clearTimeout(offlineTimerRef.current);
+        setConnected(true);
+        setError("");
+      };
       socket.onclose = () => {
-        setConnected(false);
+        // Do not flash "offline" for a normal, short hotspot/WebSocket reconnect.
+        if (offlineTimerRef.current !== null) window.clearTimeout(offlineTimerRef.current);
+        offlineTimerRef.current = window.setTimeout(() => setConnected(false), 3500);
         if (shouldReconnectRef.current) {
           reconnectTimerRef.current = window.setTimeout(connect, 2000);
         }
@@ -70,6 +79,13 @@ export function useEmgBridge(): EmgBridge {
           setEnvelope(message.envelope ?? 0);
           setArmed(Boolean(message.armed));
           if (message.threshold !== undefined) setThreshold(message.threshold);
+          // The ESP32 keeps calibrating locally even when a phone-hotspot WebSocket
+          // briefly drops. On reconnect, its state packet is enough to restore the UI.
+          if (message.calibrated) setPhase("complete");
+          else if (message.phase && message.phase !== "complete") {
+            setPhase(message.phase);
+            setRemaining(Math.ceil(message.remaining ?? 0));
+          }
         }
         if (message.type === "calibration") {
           setPhase(message.phase ?? "idle");
@@ -89,17 +105,29 @@ export function useEmgBridge(): EmgBridge {
   }, [address]);
 
   const startCalibration = useCallback(() => {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) {
-      setError("Connect to the ESP32 before starting calibration.");
-      return;
-    }
     setError("");
-    socketRef.current.send(JSON.stringify({ type: "startCalibration" }));
-  }, []);
+    setPhase("relax");
+    setRemaining(5);
+    // HTTP avoids losing the calibration command during a short WebSocket reconnect.
+    try {
+      const endpoint = new URL(address.trim());
+      endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
+      endpoint.pathname = "/calibrate";
+      endpoint.search = "";
+      fetch(endpoint.toString(), { method: "POST" }).catch(() => {
+        setError("Could not start calibration. Check that the ESP32 is reachable.");
+        setPhase("idle");
+      });
+    } catch {
+      setError("The ESP32 address is not valid.");
+      setPhase("idle");
+    }
+  }, [address]);
 
   useEffect(() => () => {
     shouldReconnectRef.current = false;
     if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    if (offlineTimerRef.current !== null) window.clearTimeout(offlineTimerRef.current);
     socketRef.current?.close();
   }, []);
 

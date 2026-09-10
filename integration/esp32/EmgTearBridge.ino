@@ -1,6 +1,7 @@
 
 
 #include <WiFi.h>
+#include <esp_system.h>
 #include <ESPAsyncWebServer.h>
 #define WIFI_SSID "Aryan"
 #define WIFI_PASSWORD "123456789"
@@ -14,6 +15,7 @@
 #define RELEASE_MS 3000
 #define SQUEEZE_CYCLES 3
 #define TEAR_WINDOW_MS 2000
+#define TEST_TEAR_BUTTON 0  // ESP32 BOOT button (GPIO 0). Temporary communication-test trigger.
 #define CALIBRATION_SAMPLES 140
 
 AsyncWebServer server(80);
@@ -43,6 +45,75 @@ float squeezeSamples[CALIBRATION_SAMPLES];
 int relaxCount = 0;
 int squeezeCount = 0;
 int completedCycles = 0;
+unsigned long lastWifiCheckAt = 0;
+unsigned long lastWifiAttemptAt = 0;
+bool wifiWasConnected = false;
+
+const char *phaseName();
+
+const char *wifiStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "idle";
+    case WL_NO_SSID_AVAIL: return "network not found";
+    case WL_SCAN_COMPLETED: return "scan completed";
+    case WL_CONNECTED: return "connected";
+    case WL_CONNECT_FAILED: return "connection failed";
+    case WL_CONNECTION_LOST: return "connection lost";
+    case WL_DISCONNECTED: return "disconnected";
+    default: return "unknown";
+  }
+}
+
+const char *resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "external reset / EN button";
+    case ESP_RST_SW: return "software reset";
+    case ESP_RST_PANIC: return "panic (crash)";
+    case ESP_RST_INT_WDT: return "interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "other watchdog";
+    case ESP_RST_BROWNOUT: return "brownout (power voltage dropped)";
+    case ESP_RST_SDIO: return "SDIO reset";
+    default: return "unknown";
+  }
+}
+
+void keepWifiConnected() {
+  if (millis() - lastWifiCheckAt < 5000) return;
+  lastWifiCheckAt = millis();
+
+  wl_status_t status = WiFi.status();
+  if (status == WL_CONNECTED) {
+    if (!wifiWasConnected) {
+      wifiWasConnected = true;
+      Serial.print("Wi-Fi connected. ESP32 IP: ");
+      Serial.println(WiFi.localIP());
+    }
+    return;
+  }
+
+  wifiWasConnected = false;
+  // WiFi.begin() while the driver is already connecting produces
+  // "sta is connecting, cannot set config" and can make reconnects less reliable.
+  if (millis() - lastWifiAttemptAt < 15000) {
+    Serial.print("Wi-Fi still connecting: ");
+    Serial.println(wifiStatusName(status));
+    return;
+  }
+
+  lastWifiAttemptAt = millis();
+  if (status == WL_IDLE_STATUS) {
+    Serial.println("Wi-Fi connection stalled -> reconnecting...");
+    WiFi.reconnect();
+    return;
+  }
+
+  Serial.print("Wi-Fi not connected: ");
+  Serial.print(wifiStatusName(status));
+  Serial.println(" -> retrying...");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+}
 
 float EMGFilter(float input) {
   float output = input;
@@ -70,7 +141,9 @@ float percentile(float *values, int count, float fraction) {
 const char *phaseName() { return calibrationPhase == RELAX ? "relax" : calibrationPhase == SQUEEZE ? "squeeze" : calibrationPhase == RELEASE ? "release" : calibrationPhase == COMPLETE ? "complete" : "idle"; }
 
 String stateJson() {
-  return String("{\"type\":\"emg\",\"envelope\":") + String(envelope, 1) + ",\"baseline\":" + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + ",\"armed\":" + (armed ? "true" : "false") + ",\"calibrated\":" + (calibrated ? "true" : "false") + "}";
+  unsigned long duration = calibrationPhase == RELAX ? RELAX_MS : calibrationPhase == SQUEEZE ? SQUEEZE_MS : RELEASE_MS;
+  float remaining = calibrationPhase == IDLE || calibrationPhase == COMPLETE ? 0 : max(0L, (long)(duration - (millis() - phaseStartedAt))) / 1000.0f;
+  return String("{\"type\":\"emg\",\"envelope\":") + String(envelope, 1) + ",\"baseline\":" + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + ",\"armed\":" + (armed ? "true" : "false") + ",\"calibrated\":" + (calibrated ? "true" : "false") + ",\"phase\":\"" + phaseName() + "\",\"remaining\":" + String(remaining, 1) + "}";
 }
 
 void sendCalibrationStatus() {
@@ -97,32 +170,53 @@ void finishCalibration() {
   ws.textAll(String("{\"type\":\"calibrationComplete\",\"baseline\":") + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + "}");
 }
 
+void startCalibration() {
+  calibrated = false; armed = false; waitingForRelease = releasedSinceArm = false; tearWindowUntil = 0;
+  aboveCount = belowCount = 0; relaxCount = squeezeCount = completedCycles = 0;
+  calibrationPhase = RELAX; phaseStartedAt = millis();
+  sendCalibrationStatus();
+  Serial.println("Calibration started");
+}
+
 void onWsEvent(AsyncWebSocket *, AsyncWebSocketClient *, AwsEventType type, void *, uint8_t *data, size_t len) {
   if (type != WS_EVT_DATA) return;
   String command;
   for (size_t i = 0; i < len; i++) command += (char)data[i];
-  if (command.indexOf("startCalibration") >= 0) {
-    calibrated = false; armed = false; waitingForRelease = releasedSinceArm = false; tearWindowUntil = 0;
-    aboveCount = belowCount = 0; relaxCount = squeezeCount = completedCycles = 0;
-    calibrationPhase = RELAX; phaseStartedAt = millis();
-    sendCalibrationStatus();
-  }
+  if (command.indexOf("startCalibration") >= 0) startCalibration();
 }
 
 void setup() {
   Serial.begin(115200);
+  delay(200);
+  Serial.println();
+  Serial.print("ESP32 booted. Reset reason: ");
+  Serial.println(resetReasonName(esp_reset_reason()));
   analogReadResolution(12);
+  pinMode(TEST_TEAR_BUTTON, INPUT_PULLUP);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false); // Keep the radio awake; helpful for real-time hotspot telemetry.
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print('.'); }
-  Serial.print("\nESP32 IP: "); Serial.println(WiFi.localIP());
+  lastWifiAttemptAt = millis();
+  Serial.print("Connecting to Wi-Fi in the background (SSID: ");
+  Serial.print(WIFI_SSID);
+  Serial.println(")...");
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
   server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request) { request->send(200, "application/json", stateJson()); });
+  server.on("/calibrate", HTTP_POST, [](AsyncWebServerRequest *request) {
+    startCalibration();
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", stateJson());
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+  });
   server.begin();
+  Serial.println("HTTP server started. Waiting for Wi-Fi connection...");
 }
 
 void loop() {
+  keepWifiConnected();
+
   static unsigned long lastSampleAt = 0;
   unsigned long now = micros();
   if (now - lastSampleAt >= 1000000UL / SAMPLE_RATE) {
@@ -190,6 +284,23 @@ void loop() {
       aboveCount = 0;
     }
   }
+
+  // Temporary communication test: one BOOT press opens the same two-second window as a strong EMG squeeze.
+  // Use EN only to reset the ESP32; it is not a readable input button.
+  static bool wasBootPressed = false;
+  bool bootPressed = digitalRead(TEST_TEAR_BUTTON) == LOW;
+  if (bootPressed && !wasBootPressed)
+  {
+    armed = true;
+    tearWindowUntil = millis() + TEAR_WINDOW_MS;
+    releasedSinceArm = true;
+    waitingForRelease = false;
+    aboveCount = belowCount = 0;
+    Serial.println("BOOT pressed -> 2-second tear window opened");
+    Serial.println(stateJson());
+  }
+  wasBootPressed = bootPressed;
+
   ws.textAll(stateJson());
   ws.cleanupClients();
 }

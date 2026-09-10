@@ -6,34 +6,104 @@ using UnityEngine.Networking;
 // Attach once in your scene. It polls the ESP32 directly, so it also works on a Quest build.
 public class EmgTearGate : MonoBehaviour
 {
-    [Tooltip("ESP32 address printed in the Arduino Serial Monitor. Quest and ESP32 must be on the same Wi-Fi.")]
+    [Tooltip("ESP32 address printed in the Arduino Serial Monitor. Used when Use Laptop Relay is disabled.")]
     public string esp32StateUrl = "http://192.168.1.50/state";
+    [Tooltip("When enabled, Unity polls the laptop relay instead of the ESP32 directly. The laptop must run npm run relay and be reachable from the Quest.")]
+    public bool useLaptopRelay = false;
+    [Tooltip("Use the laptop Wi-Fi IPv4 address, never localhost, e.g. http://192.168.1.5:3001/emg/state.")]
+    public string laptopRelayStateUrl = "http://192.168.1.5:3001/emg/state";
     [Min(0.05f)] public float pollInterval = 0.05f;
     [Tooltip("Small network tolerance only. The ESP32 itself owns the two-second tear window.")]
     [Min(0.05f)] public float armedGraceSeconds = 0.15f;
 
-    [Serializable] private class EmgState { public bool armed; public bool calibrated; public float envelope; public float threshold; }
+    [Serializable] private class EmgState { public bool armed; public bool calibrated; public bool connected; public bool manualTest; public float envelope; public float threshold; public string error; }
     private float armedUntil;
-    public bool IsCalibrated { get; private set; }
-    public bool CanTear => IsCalibrated && Time.time <= armedUntil;
+    [Header("Runtime debug (visible only while Play Mode is running)")]
+    [Tooltip("True means Unity can reach the ESP32 and it has a saved calibration.")]
+    public bool isCalibrated;
+    [Tooltip("True only during the ESP32's two-second tear window.")]
+    public bool canTear;
+    public float lastEnvelope;
+    public float lastThreshold;
+    [TextArea] public string connectionStatus = "Waiting to poll ESP32...";
+    [TextArea] public string relayError = "";
 
-    private void OnEnable() => StartCoroutine(PollState());
+    public bool IsCalibrated { get; private set; }
+    public bool CanTear => canTear;
+    private bool previousArmed;
+    private string previousError;
+    private string ActiveStateUrl => useLaptopRelay ? laptopRelayStateUrl : esp32StateUrl;
+
+    private void OnEnable()
+    {
+        connectionStatus = "Polling ESP32...";
+        StartCoroutine(PollState());
+    }
     private IEnumerator PollState()
     {
         var wait = new WaitForSeconds(pollInterval);
         while (enabled)
         {
-            using (var request = UnityWebRequest.Get(esp32StateUrl))
+            using (var request = UnityWebRequest.Get(ActiveStateUrl))
             {
                 request.timeout = 2;
                 yield return request.SendWebRequest();
                 if (request.result == UnityWebRequest.Result.Success)
                 {
                     var state = JsonUtility.FromJson<EmgState>(request.downloadHandler.text);
+                    if (useLaptopRelay && !state.connected)
+                    {
+                        IsCalibrated = false;
+                        isCalibrated = false;
+                        canTear = false;
+                        relayError = string.IsNullOrEmpty(state.error) ? "Relay has no ESP32 connection." : state.error;
+                        connectionStatus = $"Relay connected, but ESP32 is unavailable: {relayError}";
+                        if (relayError != previousError)
+                        {
+                            Debug.LogError($"[EmgTearGate] {connectionStatus}");
+                            previousError = relayError;
+                        }
+                        continue;
+                    }
+
                     IsCalibrated = state.calibrated;
+                    isCalibrated = state.calibrated;
+                    lastEnvelope = state.envelope;
+                    lastThreshold = state.threshold;
+                    relayError = "";
                     if (state.armed) armedUntil = Time.time + armedGraceSeconds;
+                    canTear = IsCalibrated && Time.time <= armedUntil;
+                    connectionStatus = state.manualTest
+                        ? "Laptop test tear window active"
+                        : state.armed
+                            ? "ESP32 connected — tear window active"
+                        : IsCalibrated
+                            ? "ESP32 connected — calibrated, waiting for squeeze"
+                            : "ESP32 connected — calibration required";
+
+                    if (state.armed != previousArmed)
+                    {
+                        Debug.Log($"[EmgTearGate] ESP32 armed changed to {state.armed} | " +
+                                  $"calibrated: {state.calibrated} | envelope: {state.envelope:F1} | " +
+                                  $"threshold: {state.threshold:F1} | CanTear: {canTear}");
+                        previousArmed = state.armed;
+                    }
+                }
+                else
+                {
+                    IsCalibrated = false;
+                    isCalibrated = false;
+                    canTear = false;
+                    connectionStatus = $"ESP32 request failed: {request.error}";
+                    if (request.error != previousError)
+                    {
+                        Debug.LogError($"[EmgTearGate] Cannot reach {ActiveStateUrl}. " +
+                                       $"Check the selected relay/direct URL and local Wi-Fi. Error: {request.error}");
+                        previousError = request.error;
+                    }
                 }
             }
+            canTear = IsCalibrated && Time.time <= armedUntil;
             yield return wait;
         }
     }

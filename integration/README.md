@@ -9,4 +9,10 @@
 
 The ESP32 is the source of truth. A sustained calibrated squeeze opens one two-second tear window. It is not cancelled by a normal EMG dip, and a continuous hold must be released before it can arm a second time. The browser only controls calibration and shows telemetry; Unity polls `http://ESP32_IP/state`, so closing the dashboard does not make the Quest connection fail after calibration.
 
+## Optional laptop relay (ESP32 → laptop → Unity/Quest)
+
+Use this when a Quest cannot reliably reach the ESP32 directly. In `.env.local`, set `ESP32_STATE_URL` to the current ESP32 address, then run `npm run relay`. The relay listens on port 3001, polls the ESP32, broadcasts `emg:state` over Socket.IO, and also provides `GET /emg/state` for Unity's built-in HTTP client.
+
+Find the laptop's Wi-Fi IPv4 address and, in Unity's `EmgTearGate`, enable **Use Laptop Relay** and set **Laptop Relay State Url** to `http://LAPTOP_WIFI_IP:3001/emg/state`. Do not use `localhost` on a Quest: it refers to the Quest itself. Visit `http://LAPTOP_WIFI_IP:3001/health` from another device to confirm the relay can reach the ESP32.
+
 Calibration intentionally rejects a run where the squeeze is too close to rest. Re-seat electrodes, keep cables still, and calibrate again. This is more dependable than a fixed threshold, but no EMG threshold can be guaranteed until it is tested with the actual electrode placement, person, and controller strap.
