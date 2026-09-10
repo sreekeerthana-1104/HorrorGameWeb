@@ -143,7 +143,7 @@ const char *phaseName() { return calibrationPhase == RELAX ? "relax" : calibrati
 String stateJson() {
   unsigned long duration = calibrationPhase == RELAX ? RELAX_MS : calibrationPhase == SQUEEZE ? SQUEEZE_MS : RELEASE_MS;
   float remaining = calibrationPhase == IDLE || calibrationPhase == COMPLETE ? 0 : max(0L, (long)(duration - (millis() - phaseStartedAt))) / 1000.0f;
-  return String("{\"type\":\"emg\",\"envelope\":") + String(envelope, 1) + ",\"baseline\":" + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + ",\"armed\":" + (armed ? "true" : "false") + ",\"calibrated\":" + (calibrated ? "true" : "false") + ",\"phase\":\"" + phaseName() + "\",\"remaining\":" + String(remaining, 1) + "}";
+  return String("{\"type\":\"emg\",\"envelope\":") + String(envelope, 1) + ",\"baseline\":" + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + ",\"armed\":" + (armed ? "true" : "false") + ",\"calibrated\":" + (calibrated ? "true" : "false") + ",\"phase\":\"" + phaseName() + "\",\"remaining\":" + String(remaining, 1) + ",\"connected\":true}";
 }
 
 void sendCalibrationStatus() {
@@ -203,7 +203,11 @@ void setup() {
   Serial.println(")...");
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
-  server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request) { request->send(200, "application/json", stateJson()); });
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request) {
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", stateJson());
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+  });
   server.on("/calibrate", HTTP_POST, [](AsyncWebServerRequest *request) {
     startCalibration();
     AsyncWebServerResponse *response = request->beginResponse(200, "application/json", stateJson());
@@ -244,7 +248,9 @@ void loop() {
   }
 
   if (!calibrated) {
-    armed = false;
+    // The BOOT test button still opens a real 2-second tear window even before calibration,
+    // so the ESP32 -> Unity path can be checked without a working electrode setup.
+    armed = millis() < tearWindowUntil;
   } else if (armed) {
     // Once opened, the interaction stays available for exactly two seconds even if EMG dips.
     if (envelope <= releaseThreshold) {

@@ -34,11 +34,18 @@ public class HeadTear : MonoBehaviour
     [Tooltip("Scene-level EMG bridge. The head can tear only while the ESP32 two-second tear window is active.")]
     public EmgTearGate emgTearGate;
 
+    [Tooltip("Seconds of leeway between holding the head and the EMG tear window opening. If the " +
+             "window opens just after you let go, or you squeeze a moment before your hand reaches " +
+             "the head, the tear still counts — so grab-and-rip isn't frame-perfect.")]
+    public float tearGrabGraceSeconds = 0.5f;
+
     private Rigidbody rb;
     private Grabbable grabbable;
     private bool isTorn = false;
     private bool isHeldAfterTear = false;
     private bool loggedBlockedGrab = false;
+    private float lastGrabbedAt = -999f;
+    private float lastBlockedLogAt = -999f;
     private ZombieChase cachedChase;
     private BloodDrip bloodDrip;
 
@@ -48,6 +55,10 @@ public class HeadTear : MonoBehaviour
         grabbable = GetComponent<Grabbable>();
         cachedChase = GetComponentInParent<ZombieChase>();
         bloodDrip = GetComponent<BloodDrip>();
+
+        if (grabbable == null)
+            Debug.LogError("[HeadTear] No Grabbable on this object, so the head can never be grabbed " +
+                           "and never tear. Add the Oculus Interaction Grabbable used for the head grab point.");
 
         // The zombie is a prefab while EmgTearBridge is scene-level, so the prefab
         // cannot reliably keep a direct serialized reference to it. Find it at runtime.
@@ -72,20 +83,29 @@ public class HeadTear : MonoBehaviour
         if (!isTorn)
         {
             bool isBeingGrabbed = grabbable != null && grabbable.SelectingPointsCount > 0;
-            if (isBeingGrabbed && emgTearGate != null && emgTearGate.CanTear)
+            if (isBeingGrabbed) lastGrabbedAt = Time.time;
+            bool grabbedRecently = Time.time - lastGrabbedAt <= tearGrabGraceSeconds;
+            bool windowOpen = emgTearGate != null && emgTearGate.CanTear;
+
+            if (windowOpen && (isBeingGrabbed || grabbedRecently))
             {
-                Debug.Log("[HeadTear] Grab + ESP32 tear window detected -> tearing off.");
+                Debug.Log($"[HeadTear] Grab + EMG tear window -> tearing off. " +
+                          $"(holding now: {isBeingGrabbed}, grabbed within {tearGrabGraceSeconds}s: {grabbedRecently})");
                 TearOff();
             }
             else if (isBeingGrabbed && emgTearGate == null && !loggedBlockedGrab)
             {
                 loggedBlockedGrab = true;
-                Debug.LogError("[HeadTear] Grab detected, but Emg Tear Gate is EMPTY. Drag EmgTearBridge into this HeadTear field.");
+                Debug.LogError("[HeadTear] Grab detected, but Emg Tear Gate is EMPTY and none was found " +
+                               "in the scene. Add EmgTearBridge (with EmgTearGate) to the scene.");
             }
-            else if (isBeingGrabbed && emgTearGate != null && !emgTearGate.CanTear && !loggedBlockedGrab)
+            else if (isBeingGrabbed && emgTearGate != null && !windowOpen && Time.time - lastBlockedLogAt > 1f)
             {
-                loggedBlockedGrab = true;
-                Debug.Log($"[HeadTear] Grab detected, but CanTear is false. EMG status: {emgTearGate.connectionStatus}");
+                lastBlockedLogAt = Time.time;
+                Debug.Log($"[HeadTear] Holding the head, waiting for the EMG tear window. " +
+                          $"EMG: {emgTearGate.connectionStatus} | calibrated: {emgTearGate.IsCalibrated} | " +
+                          $"envelope {emgTearGate.lastEnvelope:F0} / threshold {emgTearGate.lastThreshold:F0} — " +
+                          $"squeeze the controller harder and hold it.");
             }
             else if (!isBeingGrabbed)
             {

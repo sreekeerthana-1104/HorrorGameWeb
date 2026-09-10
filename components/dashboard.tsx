@@ -24,9 +24,13 @@ export function Dashboard() {
   const triggerUnityTearTest = async () => {
     setTestTearPending(true);
     const configured = process.env.NEXT_PUBLIC_REALTIME_GATEWAY_URL;
-    const relayBase = configured
-      ? configured.replace(/^ws/i, "http").replace(/\/$/, "")
-      : `http://${window.location.hostname}:3001`;
+    // A localhost/unset gateway only resolves on the laptop itself. Fall back to the host
+    // that served this page so the button also works from a phone or the Quest browser.
+    const remoteConfigured =
+      configured && !/\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(configured)
+        ? configured.replace(/^ws/i, "http").replace(/\/$/, "")
+        : "";
+    const relayBase = remoteConfigured || `http://${window.location.hostname}:3001`;
     try {
       const response = await fetch(`${relayBase}/emg/test-tear?durationMs=8000`, { method: "POST" });
       if (!response.ok) throw new Error(`Relay returned ${response.status}`);

@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -32,77 +33,118 @@ public class EmgTearGate : MonoBehaviour
     public bool CanTear => canTear;
     private bool previousArmed;
     private string previousError;
-    private string ActiveStateUrl => useLaptopRelay ? laptopRelayStateUrl : esp32StateUrl;
+    private string lastGoodUrl;
 
     private void OnEnable()
     {
-        connectionStatus = "Polling ESP32...";
+        connectionStatus = "Polling EMG source...";
         StartCoroutine(PollState());
     }
+
+    // Preferred endpoint first, then the other one as an automatic fallback, so a wrong
+    // "Use Laptop Relay" toggle (or a relay that just isn't running yet) can't silently
+    // break the whole tear pipeline.
+    private List<string> CandidateUrls()
+    {
+        var list = new List<string>();
+        void Add(string url)
+        {
+            if (!string.IsNullOrEmpty(url) && !list.Contains(url)) list.Add(url);
+        }
+        Add(lastGoodUrl);
+        if (useLaptopRelay) { Add(laptopRelayStateUrl); Add(esp32StateUrl); }
+        else { Add(esp32StateUrl); Add(laptopRelayStateUrl); }
+        return list;
+    }
+
     private IEnumerator PollState()
     {
         var wait = new WaitForSeconds(pollInterval);
         while (enabled)
         {
-            using (var request = UnityWebRequest.Get(ActiveStateUrl))
+            bool handled = false;
+
+            foreach (var url in CandidateUrls())
             {
-                request.timeout = 2;
-                yield return request.SendWebRequest();
-                if (request.result == UnityWebRequest.Result.Success)
+                using (var request = UnityWebRequest.Get(url))
                 {
-                    var state = JsonUtility.FromJson<EmgState>(request.downloadHandler.text);
-                    if (useLaptopRelay && !state.connected)
+                    request.timeout = 2;
+                    yield return request.SendWebRequest();
+
+                    if (request.result != UnityWebRequest.Result.Success)
                     {
-                        IsCalibrated = false;
-                        isCalibrated = false;
-                        canTear = false;
-                        relayError = string.IsNullOrEmpty(state.error) ? "Relay has no ESP32 connection." : state.error;
-                        connectionStatus = $"Relay connected, but ESP32 is unavailable: {relayError}";
-                        if (relayError != previousError)
+                        if (request.error != previousError)
                         {
-                            Debug.LogError($"[EmgTearGate] {connectionStatus}");
-                            previousError = relayError;
+                            Debug.LogWarning($"[EmgTearGate] Cannot reach {url}: {request.error}");
+                            previousError = request.error;
                         }
+                        continue; // try the next candidate URL within this same poll cycle
+                    }
+
+                    EmgState state = null;
+                    try { state = JsonUtility.FromJson<EmgState>(request.downloadHandler.text); }
+                    catch { /* handled by the null check below */ }
+
+                    if (state == null)
+                    {
+                        Debug.LogWarning($"[EmgTearGate] Unparseable state from {url}: {request.downloadHandler.text}");
                         continue;
                     }
+
+                    bool isRelayUrl = url == laptopRelayStateUrl;
+                    if (isRelayUrl && !state.connected)
+                    {
+                        relayError = string.IsNullOrEmpty(state.error) ? "Relay has no ESP32 connection." : state.error;
+                        if (relayError != previousError)
+                        {
+                            Debug.LogWarning($"[EmgTearGate] {url}: {relayError}");
+                            previousError = relayError;
+                        }
+                        continue; // relay is up but the ESP32 isn't — fall through to the direct URL
+                    }
+
+                    lastGoodUrl = url;
+                    handled = true;
+                    relayError = "";
+                    previousError = null;
 
                     IsCalibrated = state.calibrated;
                     isCalibrated = state.calibrated;
                     lastEnvelope = state.envelope;
                     lastThreshold = state.threshold;
-                    relayError = "";
                     if (state.armed) armedUntil = Time.time + armedGraceSeconds;
                     canTear = IsCalibrated && Time.time <= armedUntil;
+
+                    string via = isRelayUrl ? "laptop relay" : "ESP32 direct";
                     connectionStatus = state.manualTest
-                        ? "Laptop test tear window active"
+                        ? $"Laptop test tear window active (via {via})"
                         : state.armed
-                            ? "ESP32 connected — tear window active"
+                            ? $"Tear window active (via {via})"
                         : IsCalibrated
-                            ? "ESP32 connected — calibrated, waiting for squeeze"
-                            : "ESP32 connected — calibration required";
+                            ? $"Connected, calibrated — waiting for squeeze (via {via})"
+                            : $"Connected — calibration required (via {via})";
 
                     if (state.armed != previousArmed)
                     {
-                        Debug.Log($"[EmgTearGate] ESP32 armed changed to {state.armed} | " +
-                                  $"calibrated: {state.calibrated} | envelope: {state.envelope:F1} | " +
-                                  $"threshold: {state.threshold:F1} | CanTear: {canTear}");
+                        Debug.Log($"[EmgTearGate] armed -> {state.armed} | calibrated: {state.calibrated} | " +
+                                  $"envelope: {state.envelope:F1} | threshold: {state.threshold:F1} | " +
+                                  $"CanTear: {canTear} | via {via}");
                         previousArmed = state.armed;
                     }
-                }
-                else
-                {
-                    IsCalibrated = false;
-                    isCalibrated = false;
-                    canTear = false;
-                    connectionStatus = $"ESP32 request failed: {request.error}";
-                    if (request.error != previousError)
-                    {
-                        Debug.LogError($"[EmgTearGate] Cannot reach {ActiveStateUrl}. " +
-                                       $"Check the selected relay/direct URL and local Wi-Fi. Error: {request.error}");
-                        previousError = request.error;
-                    }
+
+                    break; // got a usable state this cycle, stop trying candidates
                 }
             }
+
+            if (!handled)
+            {
+                IsCalibrated = false;
+                isCalibrated = false;
+                canTear = false;
+                lastGoodUrl = null;
+                connectionStatus = "No EMG source reachable (tried ESP32 direct and laptop relay).";
+            }
+
             canTear = IsCalibrated && Time.time <= armedUntil;
             yield return wait;
         }
