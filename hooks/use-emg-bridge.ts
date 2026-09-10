@@ -43,16 +43,25 @@ export function useEmgBridge(): EmgBridge {
   const [remaining, setRemaining] = useState(0);
   const [error, setError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const shouldReconnectRef = useRef(false);
 
   const connect = useCallback(() => {
+    shouldReconnectRef.current = true;
+    if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
     socketRef.current?.close();
     setError("");
     setConnected(false);
     try {
       const socket = new WebSocket(address.trim());
       socketRef.current = socket;
-      socket.onopen = () => setConnected(true);
-      socket.onclose = () => setConnected(false);
+      socket.onopen = () => { setConnected(true); setError(""); };
+      socket.onclose = () => {
+        setConnected(false);
+        if (shouldReconnectRef.current) {
+          reconnectTimerRef.current = window.setTimeout(connect, 2000);
+        }
+      };
       socket.onerror = () => setError("Could not reach the ESP32. Check its Wi-Fi address and that this page is served over HTTP, not HTTPS.");
       socket.onmessage = ({ data }) => {
         let message: EmgMessage;
@@ -88,7 +97,11 @@ export function useEmgBridge(): EmgBridge {
     socketRef.current.send(JSON.stringify({ type: "startCalibration" }));
   }, []);
 
-  useEffect(() => () => socketRef.current?.close(), []);
+  useEffect(() => () => {
+    shouldReconnectRef.current = false;
+    if (reconnectTimerRef.current !== null) window.clearTimeout(reconnectTimerRef.current);
+    socketRef.current?.close();
+  }, []);
 
   return { address, setAddress, connected, envelope, threshold, baseline, armed, phase, remaining, error, connect, startCalibration };
 }

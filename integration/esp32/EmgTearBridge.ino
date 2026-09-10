@@ -10,9 +10,9 @@
 #define BUFFER_SIZE 64
 #define PUBLISH_MS 50      // 20 state updates/sec for the web UI and Unity polling.
 #define RELAX_MS 5000
-#define SQUEEZE_MS 900
-#define RELEASE_MS 900
-#define SQUEEZE_CYCLES 5
+#define SQUEEZE_MS 3000
+#define RELEASE_MS 3000
+#define SQUEEZE_CYCLES 3
 #define TEAR_WINDOW_MS 2000
 #define CALIBRATION_SAMPLES 140
 
@@ -80,10 +80,10 @@ void sendCalibrationStatus() {
 }
 
 void finishCalibration() {
-  // Median rest + typical repeated squeeze level: robust against a signal that dips during one grip.
+  // Median rest + upper repeated-squeeze level gives priority to the strong rising/high part of each grip.
   baseline = percentile(relaxSamples, relaxCount, 0.50f);
   float restHigh = percentile(relaxSamples, relaxCount, 0.90f);
-  float squeezeLevel = percentile(squeezeSamples, squeezeCount, 0.65f);
+  float squeezeLevel = percentile(squeezeSamples, squeezeCount, 0.80f);
   float separation = squeezeLevel - baseline;
   if (separation < 12.0f || separation < (restHigh - baseline) * 3.0f) {
     calibrationPhase = IDLE;

@@ -38,6 +38,7 @@ public class HeadTear : MonoBehaviour
     private Grabbable grabbable;
     private bool isTorn = false;
     private bool isHeldAfterTear = false;
+    private bool loggedWaitingForEmg = false;
     private ZombieChase cachedChase;
     private BloodDrip bloodDrip;
 
@@ -64,6 +65,15 @@ public class HeadTear : MonoBehaviour
             {
                 Debug.Log("[HeadTear] Grab + EMG squeeze detected -> tearing off.");
                 TearOff();
+            }
+            else if (isBeingGrabbed && emgTearGate != null && !emgTearGate.CanTear && !loggedWaitingForEmg)
+            {
+                loggedWaitingForEmg = true;
+                Debug.Log("[HeadTear] Grab was detected, but the two-second EMG tear window is currently closed.");
+            }
+            else if (!isBeingGrabbed)
+            {
+                loggedWaitingForEmg = false;
             }
             else if (isBeingGrabbed && emgTearGate == null)
             {
