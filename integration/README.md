@@ -7,7 +7,7 @@
 5. On first page load, enter `ws://ESP32_IP/ws`, click **Connect ESP32**, then **Start calibration**. Relax for five seconds, then follow three deliberate prompts: squeeze firmly for three seconds, release for three seconds, and repeat. The ESP32 gives priority to the stronger rising/high values from those squeezes.
 6. Follow `unity/HeadTearEmgChanges.md` in the Unity project. Put Quest and ESP32 on the same LAN.
 
-The ESP32 is the source of truth. A sustained calibrated squeeze opens one two-second tear window. It is not cancelled by a normal EMG dip, and a continuous hold must be released before it can arm a second time. The browser only controls calibration and shows telemetry; Unity polls `http://ESP32_IP/state`, so closing the dashboard does not make the Quest connection fail after calibration.
+The ESP32 is the source of truth. It reports `armed` as a live level gate: `armed` is true for as long as the calibrated squeeze stays above threshold (rise past `threshold` to arm, fall below `releaseThreshold` to disarm, 3-sample debounce), and false again the moment you relax — no latch, no two-second window, no wait-for-release. Grabbing the head in Unity tears it only while `armed` is true. The BOOT button still forces `armed` on for two seconds for wiring tests. The browser only controls calibration and shows telemetry; Unity polls `http://ESP32_IP/state`, so closing the dashboard does not make the Quest connection fail after calibration.
 
 ## Optional laptop relay (ESP32 → laptop → Unity/Quest)
 

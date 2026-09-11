@@ -34,17 +34,20 @@ public class HeadTear : MonoBehaviour
     [Tooltip("Scene-level EMG bridge. The head can tear only while the ESP32 two-second tear window is active.")]
     public EmgTearGate emgTearGate;
 
-    [Tooltip("Seconds of leeway between holding the head and the EMG tear window opening. If the " +
-             "window opens just after you let go, or you squeeze a moment before your hand reaches " +
-             "the head, the tear still counts — so grab-and-rip isn't frame-perfect.")]
-    public float tearGrabGraceSeconds = 0.5f;
+    [Header("DEBUG / bring-up")]
+    [Tooltip("TESTING ONLY. When on, the head tears the instant it is grabbed, with NO EMG / ESP32 " +
+             "check at all. Use this to confirm the grab + tear mechanic works, then turn it back off.")]
+    public bool bypassEmgForTesting = false;
+
+    [Tooltip("Logs grab state once a second even when nothing is grabbing, so you can see in logcat " +
+             "whether the Grabbable is registering your hand at all.")]
+    public bool verboseGrabLogging = false;
 
     private Rigidbody rb;
     private Grabbable grabbable;
     private bool isTorn = false;
     private bool isHeldAfterTear = false;
     private bool loggedBlockedGrab = false;
-    private float lastGrabbedAt = -999f;
     private float lastBlockedLogAt = -999f;
     private ZombieChase cachedChase;
     private BloodDrip bloodDrip;
@@ -82,27 +85,38 @@ public class HeadTear : MonoBehaviour
     {
         if (!isTorn)
         {
-            bool isBeingGrabbed = grabbable != null && grabbable.SelectingPointsCount > 0;
-            if (isBeingGrabbed) lastGrabbedAt = Time.time;
-            bool grabbedRecently = Time.time - lastGrabbedAt <= tearGrabGraceSeconds;
-            bool windowOpen = emgTearGate != null && emgTearGate.CanTear;
+            int selectingPoints = grabbable != null ? grabbable.SelectingPointsCount : -1;
+            bool isBeingGrabbed = selectingPoints > 0;
 
-            if (windowOpen && (isBeingGrabbed || grabbedRecently))
+            // Single flag: true the instant the ESP32 reports the threshold crossed (via EmgTearGate.CanTear,
+            // which itself stays true for Armed Grace Seconds after you drop back below threshold — that's
+            // the "turn off ~2s after it goes below threshold" behavior, tune it on EmgTearGate, not here).
+            // bypassEmgForTesting forces the same flag on for testing, with no EMG involved at all.
+            bool forceApplied = bypassEmgForTesting || (emgTearGate != null && emgTearGate.CanTear);
+
+            if (verboseGrabLogging && Time.time - lastBlockedLogAt > 1f)
             {
-                Debug.Log($"[HeadTear] Grab + EMG tear window -> tearing off. " +
-                          $"(holding now: {isBeingGrabbed}, grabbed within {tearGrabGraceSeconds}s: {grabbedRecently})");
+                lastBlockedLogAt = Time.time;
+                Debug.Log($"[HeadTear] grabbable: {(grabbable != null ? "yes" : "NULL")} | " +
+                          $"SelectingPointsCount: {selectingPoints} | isBeingGrabbed: {isBeingGrabbed} | " +
+                          $"forceApplied: {forceApplied} (bypass: {bypassEmgForTesting})");
+            }
+
+            if (isBeingGrabbed && forceApplied)
+            {
+                Debug.Log($"[HeadTear] Grab + force applied -> tearing off. (bypass: {bypassEmgForTesting})");
                 TearOff();
             }
-            else if (isBeingGrabbed && emgTearGate == null && !loggedBlockedGrab)
+            else if (isBeingGrabbed && emgTearGate == null && !bypassEmgForTesting && !loggedBlockedGrab)
             {
                 loggedBlockedGrab = true;
                 Debug.LogError("[HeadTear] Grab detected, but Emg Tear Gate is EMPTY and none was found " +
                                "in the scene. Add EmgTearBridge (with EmgTearGate) to the scene.");
             }
-            else if (isBeingGrabbed && emgTearGate != null && !windowOpen && Time.time - lastBlockedLogAt > 1f)
+            else if (isBeingGrabbed && emgTearGate != null && !forceApplied && Time.time - lastBlockedLogAt > 1f)
             {
                 lastBlockedLogAt = Time.time;
-                Debug.Log($"[HeadTear] Holding the head, waiting for the EMG tear window. " +
+                Debug.Log($"[HeadTear] Holding the head, waiting for threshold to be crossed. " +
                           $"EMG: {emgTearGate.connectionStatus} | calibrated: {emgTearGate.IsCalibrated} | " +
                           $"envelope {emgTearGate.lastEnvelope:F0} / threshold {emgTearGate.lastThreshold:F0} — " +
                           $"squeeze the controller harder and hold it.");

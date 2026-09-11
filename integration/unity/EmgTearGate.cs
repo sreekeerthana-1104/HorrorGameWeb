@@ -29,15 +29,22 @@ public class EmgTearGate : MonoBehaviour
     [TextArea] public string connectionStatus = "Waiting to poll ESP32...";
     [TextArea] public string relayError = "";
 
+    [Tooltip("Logs a status line ~once a second no matter what, so silence in logcat can never be " +
+             "mistaken for 'everything is fine' — if this component is alive, something prints.")]
+    public bool verboseHeartbeat = true;
+
     public bool IsCalibrated { get; private set; }
     public bool CanTear => canTear;
     private bool previousArmed;
     private string previousError;
     private string lastGoodUrl;
+    private float lastHeartbeatAt = -999f;
 
     private void OnEnable()
     {
         connectionStatus = "Polling EMG source...";
+        Debug.Log($"[EmgTearGate] OnEnable — starting poll loop. useLaptopRelay: {useLaptopRelay} | " +
+                  $"esp32StateUrl: {esp32StateUrl} | laptopRelayStateUrl: {laptopRelayStateUrl}");
         StartCoroutine(PollState());
     }
 
@@ -146,6 +153,15 @@ public class EmgTearGate : MonoBehaviour
             }
 
             canTear = IsCalibrated && Time.time <= armedUntil;
+
+            if (verboseHeartbeat && Time.time - lastHeartbeatAt > 1f)
+            {
+                lastHeartbeatAt = Time.time;
+                Debug.Log($"[EmgTearGate] heartbeat | calibrated: {IsCalibrated} | canTear: {canTear} | " +
+                          $"envelope: {lastEnvelope:F0} / threshold: {lastThreshold:F0} | " +
+                          $"lastGoodUrl: {(lastGoodUrl ?? "NONE")} | status: {connectionStatus}");
+            }
+
             yield return wait;
         }
     }

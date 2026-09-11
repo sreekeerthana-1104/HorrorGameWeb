@@ -10,6 +10,28 @@ let state = { armed: false, calibrated: false, envelope: 0, threshold: 0, connec
 let isPolling = false;
 let manualTearUntil = 0;
 
+// --- request visibility so the pipeline can be debugged from this terminal, no headset logs needed ---
+const stateClients = new Map(); // ip -> { count, lastSeen }
+let lastClientReport = 0;
+
+function noteStateRequest(ip) {
+  const now = Date.now();
+  const isNew = !stateClients.has(ip);
+  const entry = stateClients.get(ip) ?? { count: 0, lastSeen: now };
+  entry.count++;
+  entry.lastSeen = now;
+  stateClients.set(ip, entry);
+  if (isNew) console.log(`[relay] NEW /emg/state poller: ${ip}`);
+  if (now - lastClientReport > 2000) {
+    lastClientReport = now;
+    const active = [...stateClients.entries()]
+      .filter(([, e]) => now - e.lastSeen < 5000)
+      .map(([cip, e]) => `${cip} (${e.count})`);
+    const s = currentState();
+    console.log(`[relay] pollers(5s): ${active.length ? active.join(", ") : "NONE"} | serving armed=${s.armed} calibrated=${s.calibrated} manualTest=${s.manualTest}`);
+  }
+}
+
 function currentState() {
   const testActive = Date.now() < manualTearUntil;
   return testActive
@@ -19,6 +41,7 @@ function currentState() {
 
 const server = http.createServer((request, response) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+  const ip = (request.headers["x-forwarded-for"]?.split(",")[0] ?? request.socket.remoteAddress ?? "?").replace(/^::ffff:/, "");
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   response.setHeader("Cache-Control", "no-store");
@@ -28,6 +51,7 @@ const server = http.createServer((request, response) => {
     return;
   }
   if (url.pathname === "/emg/state") {
+    noteStateRequest(ip);
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(currentState()));
     return;
@@ -37,6 +61,7 @@ const server = http.createServer((request, response) => {
     const durationMs = Math.max(1000, Math.min(30000, Number.isFinite(requestedMs) ? requestedMs : 8000));
     manualTearUntil = Date.now() + durationMs;
     const responseState = currentState();
+    console.log(`[relay] TEST-TEAR from ${ip}: forcing armed=true for ${durationMs}ms`);
     publish();
     setTimeout(publish, durationMs + 20);
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -64,13 +89,18 @@ io.on("connection", (socket) => {
 async function pollEsp32() {
   if (isPolling) return;
   isPolling = true;
+  const wasConnected = state.connected;
+  const wasArmed = state.armed;
   try {
     const response = await fetch(esp32StateUrl, { signal: AbortSignal.timeout(1500) });
     if (!response.ok) throw new Error(`ESP32 returned HTTP ${response.status}`);
     const emg = await response.json();
     state = { armed: Boolean(emg.armed), calibrated: Boolean(emg.calibrated), envelope: Number(emg.envelope) || 0, threshold: Number(emg.threshold) || 0, connected: true, updatedAt: new Date().toISOString(), error: "" };
+    if (!wasConnected) console.log(`[relay] ESP32 connected (${esp32StateUrl})`);
+    if (state.armed !== wasArmed) console.log(`[relay] ESP32 armed -> ${state.armed} (envelope ${state.envelope.toFixed(0)} / threshold ${state.threshold.toFixed(0)})`);
   } catch (error) {
     state = { ...state, armed: false, connected: false, updatedAt: new Date().toISOString(), error: error.message };
+    if (wasConnected) console.log(`[relay] ESP32 DISCONNECTED: ${error.message}`);
   } finally {
     isPolling = false;
   }

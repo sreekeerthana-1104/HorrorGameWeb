@@ -247,49 +247,29 @@ void loop() {
     sendCalibrationStatus();
   }
 
+  // Live level gate: the tear is available for as long as the squeeze stays above threshold,
+  // and stops being available the moment you relax. No latch, no wait-for-release.
+  // Hysteresis (rise past `threshold` to arm, fall below `releaseThreshold` to disarm) plus a
+  // 3-sample debounce keeps it from chattering on noise.
   if (!calibrated) {
-    // The BOOT test button still opens a real 2-second tear window even before calibration,
-    // so the ESP32 -> Unity path can be checked without a working electrode setup.
-    armed = millis() < tearWindowUntil;
-  } else if (armed) {
-    // Once opened, the interaction stays available for exactly two seconds even if EMG dips.
-    if (envelope <= releaseThreshold) {
-      belowCount++;
-      if (belowCount >= 3) releasedSinceArm = true;
-    } else {
-      belowCount = 0;
-    }
-
-    if (millis() >= tearWindowUntil) {
-      armed = false;
-      waitingForRelease = !releasedSinceArm;
-      aboveCount = belowCount = 0;
-    }
-  } else if (waitingForRelease) {
-    // A long continuous squeeze must be released before it can create another tear window.
-    if (envelope <= releaseThreshold) {
-      belowCount++;
-      if (belowCount >= 3) {
-        waitingForRelease = false;
-        belowCount = 0;
-      }
-    } else {
-      belowCount = 0;
-    }
-  } else {
-    // A deliberate, sustained threshold crossing opens one new two-second tear window.
+    armed = false;
+  } else if (!armed) {
     if (envelope >= threshold) {
-      aboveCount++;
-      if (aboveCount >= 3) {
-        armed = true;
-        tearWindowUntil = millis() + TEAR_WINDOW_MS;
-        releasedSinceArm = false;
-        aboveCount = belowCount = 0;
-      }
+      if (++aboveCount >= 3) { armed = true; belowCount = 0; }
     } else {
       aboveCount = 0;
     }
+  } else {
+    if (envelope <= releaseThreshold) {
+      if (++belowCount >= 3) { armed = false; aboveCount = 0; }
+    } else {
+      belowCount = 0;
+    }
   }
+
+  // The BOOT test button forces `armed` on for two seconds regardless of EMG, so the
+  // ESP32 -> Unity path can still be checked without electrodes (works even pre-calibration).
+  if (millis() < tearWindowUntil) armed = true;
 
   // Temporary communication test: one BOOT press opens the same two-second window as a strong EMG squeeze.
   // Use EN only to reset the ESP32; it is not a readable input button.
@@ -299,8 +279,6 @@ void loop() {
   {
     armed = true;
     tearWindowUntil = millis() + TEAR_WINDOW_MS;
-    releasedSinceArm = true;
-    waitingForRelease = false;
     aboveCount = belowCount = 0;
     Serial.println("BOOT pressed -> 2-second tear window opened");
     Serial.println(stateJson());
