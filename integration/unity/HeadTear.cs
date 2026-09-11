@@ -34,6 +34,27 @@ public class HeadTear : MonoBehaviour
     [Tooltip("Scene-level EMG bridge. The head can tear only while the ESP32 two-second tear window is active.")]
     public EmgTearGate emgTearGate;
 
+    [Header("Feedback while gripped but not torn (no force yet)")]
+    [Tooltip("Rumble both controllers lightly while you're gripping the head but haven't crossed " +
+             "the EMG threshold yet, so a grab-without-force still feels like SOMETHING instead of " +
+             "being completely invisible. Stops the moment you let go or it tears.")]
+    public bool grabWithoutForceHaptics = true;
+    [Range(0f, 1f)] public float grabHapticAmplitude = 0.25f;
+    [Range(0f, 1f)] public float grabHapticFrequency = 0.2f;
+
+    [Tooltip("Optional. A looping strain/creak sound that plays while gripping without enough " +
+             "force, and stops on release or tear. Leave empty to skip — assign an AudioSource " +
+             "(with its clip and Loop already set) on this object or a child if you have one.")]
+    public AudioSource strainAudio;
+
+    [Tooltip("A short, stronger haptic pulse on both controllers at the instant of the tear itself " +
+             "— the 'pop' payoff. Set amplitude to 0 to disable.")]
+    [Range(0f, 1f)] public float tearHapticAmplitude = 0.9f;
+    [Range(0f, 1f)] public float tearHapticFrequency = 0.3f;
+    public float tearHapticDurationSeconds = 0.15f;
+
+    private bool wasGrabbingWithoutForce = false;
+
     [Header("DEBUG / bring-up")]
     [Tooltip("TESTING ONLY. When on, the head tears the instant it is grabbed, with NO EMG / ESP32 " +
              "check at all. Use this to confirm the grab + tear mechanic works, then turn it back off.")]
@@ -94,6 +115,19 @@ public class HeadTear : MonoBehaviour
             // bypassEmgForTesting forces the same flag on for testing, with no EMG involved at all.
             bool forceApplied = bypassEmgForTesting || (emgTearGate != null && emgTearGate.CanTear);
 
+            // Grip registered but not enough force yet -> light rumble/creak so it doesn't feel dead.
+            bool grabbingWithoutForce = isBeingGrabbed && !forceApplied;
+            if (grabbingWithoutForce != wasGrabbingWithoutForce)
+            {
+                if (grabWithoutForceHaptics) SetGripHaptics(grabbingWithoutForce ? grabHapticFrequency : 0f, grabbingWithoutForce ? grabHapticAmplitude : 0f);
+                if (strainAudio != null)
+                {
+                    if (grabbingWithoutForce) strainAudio.Play();
+                    else strainAudio.Stop();
+                }
+                wasGrabbingWithoutForce = grabbingWithoutForce;
+            }
+
             if (verboseGrabLogging && Time.time - lastBlockedLogAt > 1f)
             {
                 lastBlockedLogAt = Time.time;
@@ -147,10 +181,30 @@ public class HeadTear : MonoBehaviour
         transform.rotation = headBone.rotation;
     }
 
+    private static void SetGripHaptics(float frequency, float amplitude)
+    {
+        OVRInput.SetControllerVibration(frequency, amplitude, OVRInput.Controller.LTouch);
+        OVRInput.SetControllerVibration(frequency, amplitude, OVRInput.Controller.RTouch);
+    }
+
+    private System.Collections.IEnumerator TearHapticBurst()
+    {
+        if (tearHapticAmplitude <= 0f) yield break;
+        SetGripHaptics(tearHapticFrequency, tearHapticAmplitude);
+        yield return new WaitForSeconds(tearHapticDurationSeconds);
+        SetGripHaptics(0f, 0f);
+    }
+
     void TearOff()
     {
         isTorn = true;
         isHeldAfterTear = true;
+
+        // Make sure the pre-tear rumble/strain sound definitely stops, then give a short, sharp
+        // "pop" burst instead — the payoff moment.
+        wasGrabbingWithoutForce = false;
+        if (strainAudio != null) strainAudio.Stop();
+        StartCoroutine(TearHapticBurst());
 
         Mesh headMesh = (bodyRenderer != null && headBone != null)
             ? ExtractHeadMesh(bodyRenderer, headBone, headWeightThreshold, headProximityRadius,

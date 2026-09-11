@@ -1,13 +1,20 @@
 
 
+// Heart rate (MAX30102, I2C) needs the "SparkFun MAX3010x Pulse and Proximity
+// Sensor Library" installed via Arduino Library Manager (search: MAX3010x).
+// Wiring: MAX30102 VIN->3V3, GND->GND, SDA->GPIO21, SCL->GPIO22 (ESP32 default I2C pins).
+// Grove GSR is a plain analog sensor: its signal pin -> GPIO35 (any free ADC1 pin), VCC/GND as usual.
 #include <WiFi.h>
 #include <esp_system.h>
 #include <ESPAsyncWebServer.h>
+#include <Wire.h>
+#include "MAX30105.h"
 #define WIFI_SSID "Aryan"
 #define WIFI_PASSWORD "123456789"
 
 #define SAMPLE_RATE 500
 #define INPUT_PIN 34       // ADC1 pin
+#define GSR_PIN 35         // ADC1 pin. Grove GSR sensor's analog output.
 #define BUFFER_SIZE 64
 #define PUBLISH_MS 50      // 20 state updates/sec for the web UI and Unity polling.
 #define RELAX_MS 5000
@@ -17,9 +24,29 @@
 #define TEAR_WINDOW_MS 2000
 #define TEST_TEAR_BUTTON 0  // ESP32 BOOT button (GPIO 0). Temporary communication-test trigger.
 #define CALIBRATION_SAMPLES 140
+#define HR_SAMPLE_MS 20     // ~50Hz IR sampling for beat detection.
+#define GSR_SAMPLE_MS 50    // ~20Hz. GSR changes slowly, no need to sample faster.
+#define IR_FINGER_THRESHOLD 50000  // Below this raw IR reading, treat as "no finger on sensor."
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+
+// --- MAX30102 heart rate ---
+MAX30105 particleSensor;
+bool maxSensorFound = false;
+float irDcBaseline = 0;
+bool irDcInitialized = false;
+float irAc = 0;
+bool irAcRising = false;
+unsigned long lastBeatAt = 0;
+float beatIntervalsMs[4] = {0, 0, 0, 0};
+uint8_t beatIntervalIndex = 0;
+uint8_t beatIntervalCount = 0;
+float heartRateBpm = 0;
+bool fingerDetected = false;
+
+// --- Grove GSR ---
+float gsrFiltered = 0;
 
 int circularBuffer[BUFFER_SIZE] = {0};
 int dataIndex = 0;
@@ -115,6 +142,50 @@ void keepWifiConnected() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 }
 
+// One IR read + a simple DC-removal beat detector: a slow low-pass tracks the
+// "no pulse" baseline, the fast-varying part above/below that baseline is the
+// pulse itself, and a beat is counted each time that pulse crosses upward
+// through zero (with a refractory period so one beat can't be double-counted).
+// This is intentionally simple — good enough for a live BPM readout, not a
+// medical-grade HRV measurement.
+void sampleHeartRate() {
+  long irValue = particleSensor.getIR();
+  fingerDetected = irValue > IR_FINGER_THRESHOLD;
+  if (!fingerDetected) {
+    irDcInitialized = false;
+    heartRateBpm = 0;
+    beatIntervalCount = 0;
+    return;
+  }
+
+  if (!irDcInitialized) { irDcBaseline = irValue; irDcInitialized = true; }
+  irDcBaseline += (irValue - irDcBaseline) * 0.02f;
+  float instantAc = irValue - irDcBaseline;
+  irAc += (instantAc - irAc) * 0.3f;
+
+  bool rising = irAc > 0;
+  unsigned long now = millis();
+  if (rising && !irAcRising && (now - lastBeatAt) > 250) {
+    if (lastBeatAt != 0) {
+      float intervalMs = now - lastBeatAt;
+      beatIntervalsMs[beatIntervalIndex] = intervalMs;
+      beatIntervalIndex = (beatIntervalIndex + 1) % 4;
+      if (beatIntervalCount < 4) beatIntervalCount++;
+      float avgMs = 0;
+      for (uint8_t i = 0; i < beatIntervalCount; i++) avgMs += beatIntervalsMs[i];
+      avgMs /= beatIntervalCount;
+      float bpm = 60000.0f / avgMs;
+      if (bpm >= 35 && bpm <= 220) heartRateBpm = bpm;  // reject obvious misfires
+    }
+    lastBeatAt = now;
+  }
+  irAcRising = rising;
+}
+
+void sampleGsr() {
+  gsrFiltered += (analogRead(GSR_PIN) - gsrFiltered) * 0.1f;  // simple EMA smoothing
+}
+
 float EMGFilter(float input) {
   float output = input;
   { static float z1, z2; float x = output - 0.05159732*z1 - 0.36347401*z2; output = 0.01856301*x + 0.03712602*z1 + 0.01856301*z2; z2 = z1; z1 = x; }
@@ -143,7 +214,10 @@ const char *phaseName() { return calibrationPhase == RELAX ? "relax" : calibrati
 String stateJson() {
   unsigned long duration = calibrationPhase == RELAX ? RELAX_MS : calibrationPhase == SQUEEZE ? SQUEEZE_MS : RELEASE_MS;
   float remaining = calibrationPhase == IDLE || calibrationPhase == COMPLETE ? 0 : max(0L, (long)(duration - (millis() - phaseStartedAt))) / 1000.0f;
-  return String("{\"type\":\"emg\",\"envelope\":") + String(envelope, 1) + ",\"baseline\":" + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + ",\"armed\":" + (armed ? "true" : "false") + ",\"calibrated\":" + (calibrated ? "true" : "false") + ",\"phase\":\"" + phaseName() + "\",\"remaining\":" + String(remaining, 1) + ",\"connected\":true}";
+  return String("{\"type\":\"emg\",\"envelope\":") + String(envelope, 1) + ",\"baseline\":" + String(baseline, 1) + ",\"threshold\":" + String(threshold, 1) + ",\"armed\":" + (armed ? "true" : "false") + ",\"calibrated\":" + (calibrated ? "true" : "false") + ",\"phase\":\"" + phaseName() + "\",\"remaining\":" + String(remaining, 1) +
+         ",\"heartRate\":" + String(heartRateBpm, 1) + ",\"fingerDetected\":" + (fingerDetected ? "true" : "false") + ",\"maxSensorFound\":" + (maxSensorFound ? "true" : "false") +
+         ",\"gsr\":" + String(gsrFiltered, 1) +
+         ",\"connected\":true}";
 }
 
 void sendCalibrationStatus() {
@@ -193,6 +267,18 @@ void setup() {
   Serial.println(resetReasonName(esp_reset_reason()));
   analogReadResolution(12);
   pinMode(TEST_TEAR_BUTTON, INPUT_PULLUP);
+
+  Wire.begin();
+  maxSensorFound = particleSensor.begin(Wire, I2C_SPEED_FAST);
+  if (maxSensorFound) {
+    particleSensor.setup();
+    particleSensor.setPulseAmplitudeRed(0x0A);
+    particleSensor.setPulseAmplitudeGreen(0);
+    Serial.println("MAX30102 detected and configured.");
+  } else {
+    Serial.println("MAX30102 not detected — heart rate will report 0. Check wiring (SDA=21, SCL=22).");
+  }
+
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(false); // Keep the radio awake; helpful for real-time hotspot telemetry.
@@ -227,6 +313,19 @@ void loop() {
     lastSampleAt += 1000000UL / SAMPLE_RATE;
     envelope = getEnvelope(abs((int)EMGFilter(analogRead(INPUT_PIN))));
   }
+
+  static unsigned long lastHrSampleAt = 0;
+  if (maxSensorFound && millis() - lastHrSampleAt >= HR_SAMPLE_MS) {
+    lastHrSampleAt = millis();
+    sampleHeartRate();
+  }
+
+  static unsigned long lastGsrSampleAt = 0;
+  if (millis() - lastGsrSampleAt >= GSR_SAMPLE_MS) {
+    lastGsrSampleAt = millis();
+    sampleGsr();
+  }
+
   if (millis() - lastPublishAt < PUBLISH_MS) return;
   lastPublishAt = millis();
 

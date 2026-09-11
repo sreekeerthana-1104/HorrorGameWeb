@@ -14,7 +14,14 @@ type EmgMessage = {
   phase?: CalibrationPhase;
   remaining?: number;
   message?: string;
+  heartRate?: number;
+  fingerDetected?: boolean;
+  maxSensorFound?: boolean;
+  gsr?: number;
 };
+
+const TREND_LENGTH = 40;
+const TREND_SAMPLE_MS = 500; // one point every 500ms -> ~20s of real history per trend
 
 export type EmgBridge = {
   address: string;
@@ -29,6 +36,12 @@ export type EmgBridge = {
   error: string;
   connect: () => void;
   startCalibration: () => void;
+  heartRate: number;
+  fingerDetected: boolean;
+  maxSensorFound: boolean;
+  gsr: number;
+  heartRateTrend: number[];
+  gsrTrend: number[];
 };
 
 const defaultAddress = "ws://192.168.1.50/ws";
@@ -43,10 +56,17 @@ export function useEmgBridge(): EmgBridge {
   const [phase, setPhase] = useState<CalibrationPhase>("idle");
   const [remaining, setRemaining] = useState(0);
   const [error, setError] = useState("");
+  const [heartRate, setHeartRate] = useState(0);
+  const [fingerDetected, setFingerDetected] = useState(false);
+  const [maxSensorFound, setMaxSensorFound] = useState(false);
+  const [gsr, setGsr] = useState(0);
+  const [heartRateTrend, setHeartRateTrend] = useState<number[]>([]);
+  const [gsrTrend, setGsrTrend] = useState<number[]>([]);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const offlineTimerRef = useRef<number | null>(null);
   const shouldReconnectRef = useRef(false);
+  const lastTrendSampleAtRef = useRef(0);
 
   const connect = useCallback(() => {
     shouldReconnectRef.current = true;
@@ -85,6 +105,22 @@ export function useEmgBridge(): EmgBridge {
           else if (message.phase && message.phase !== "complete") {
             setPhase(message.phase);
             setRemaining(Math.ceil(message.remaining ?? 0));
+          }
+
+          const nextHeartRate = message.heartRate ?? 0;
+          const nextGsr = message.gsr ?? 0;
+          setHeartRate(nextHeartRate);
+          setFingerDetected(Boolean(message.fingerDetected));
+          setMaxSensorFound(Boolean(message.maxSensorFound));
+          setGsr(nextGsr);
+
+          // Real readings only, sampled at a fixed cadence (not every ~50ms packet)
+          // so the trend covers a meaningful stretch of time instead of a jittery blur.
+          const now = Date.now();
+          if (now - lastTrendSampleAtRef.current >= TREND_SAMPLE_MS) {
+            lastTrendSampleAtRef.current = now;
+            setHeartRateTrend((prev) => [...prev, nextHeartRate].slice(-TREND_LENGTH));
+            setGsrTrend((prev) => [...prev, nextGsr].slice(-TREND_LENGTH));
           }
         }
         if (message.type === "calibration") {
@@ -131,5 +167,8 @@ export function useEmgBridge(): EmgBridge {
     socketRef.current?.close();
   }, []);
 
-  return { address, setAddress, connected, envelope, threshold, baseline, armed, phase, remaining, error, connect, startCalibration };
+  return {
+    address, setAddress, connected, envelope, threshold, baseline, armed, phase, remaining, error, connect, startCalibration,
+    heartRate, fingerDetected, maxSensorFound, gsr, heartRateTrend, gsrTrend,
+  };
 }
