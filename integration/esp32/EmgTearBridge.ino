@@ -1,9 +1,34 @@
 
-
-// Heart rate (MAX30102, I2C) needs the "SparkFun MAX3010x Pulse and Proximity
-// Sensor Library" installed via Arduino Library Manager (search: MAX3010x).
-// Wiring: MAX30102 VIN->3V3, GND->GND, SDA->GPIO21, SCL->GPIO22 (ESP32 default I2C pins).
-// Grove GSR is a plain analog sensor: its signal pin -> GPIO35 (any free ADC1 pin), VCC/GND as usual.
+// CIRCUIT / WIRING REFERENCE
+// Three sensors, all sharing one ESP32 ground:
+//
+// 1) BioAmp EXG Pill (controller-grip EMG, forearm electrodes)
+//      SIGNAL (analog out) -> GPIO34   (ADC1, INPUT_PIN)
+//      GND                 -> GND
+//      VCC                 -> 3V3 
+//
+// 2) Grove GSR sensor (skin conductance, finger electrodes)
+//      SIG (yellow wire)   -> GPIO35   (ADC1, GSR_PIN)
+//      VCC                 -> 3V3
+//      GND                 -> GND
+//
+// 3) MAX30102 heart-rate/SpO2 sensor
+//  EAR CLIP (not the usual fingertip clip)
+//    holding VR controllers. This breakout has 8 pins across two rows:
+//      row A: VIN, SDA, SCL, GND
+//      row B: GND, RD, IRD, INT
+//    Only I2C + power are used by this firmware — wire just these 4:
+//      VIN -> 3V3
+//      GND -> GND        (either GND pin works; the second is redundant)
+//      SDA -> GPIO21      (ESP32 default I2C data pin)
+//      SCL -> GPIO22      (ESP32 default I2C clock pin)
+//    RD, IRD, and INT are this breakout's extra analog LED-current / interrupt
+//    pins — NOT used here (we read Red/IR through the I2C FIFO instead via the
+//    SparkFun library). Leave RD, IRD, and INT unconnected.
+//
+//
+// Library needed: "SparkFun MAX3010x Pulse and Proximity Sensor Library"
+// (Arduino Library Manager, search: MAX3010x) for the MAX30102/HW-605.
 #include <WiFi.h>
 #include <esp_system.h>
 #include <ESPAsyncWebServer.h>
@@ -269,6 +294,8 @@ void setup() {
   pinMode(TEST_TEAR_BUTTON, INPUT_PULLUP);
 
   Wire.begin();
+  Wire.setTimeOut(50);  // ms. A half-wired/absent MAX30102 must never hang the I2C bus long
+                        // enough to trip the watchdog and reboot the board — fail fast instead.
   maxSensorFound = particleSensor.begin(Wire, I2C_SPEED_FAST);
   if (maxSensorFound) {
     particleSensor.setup();

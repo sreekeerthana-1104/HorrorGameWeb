@@ -5,15 +5,51 @@ using System.Collections;
 [RequireComponent(typeof(NavMeshAgent))]
 public class ZombieChase : MonoBehaviour
 {
+    [Header("Detection")]
+    [Tooltip("Player must be within this distance for the zombie to notice and start " +
+             "chasing. Beyond it, the zombie stays idle (Speed = 0). Ignored once crawling " +
+             "-- a crawling zombie always keeps hunting regardless of distance.")]
+    public float detectionRange = 8f;
+
     [Header("Chase")]
     public Transform player;
     public float stopDistance = 1.2f;
     public float repathInterval = 0.2f;
     public float attackCooldown = 1.5f;
 
+    [Header("Attack Damage")]
+    [Tooltip("Player's health component. Damage is applied the same frame the Attack " +
+             "trigger fires.")]
+    public PlayerHealth playerHealth;
+    public float attackDamage = 12f;
+
+    [Header("Audio")]
+    public ZombieAudio zombieAudio;
+
+    [Header("Blood")]
+    public BloodEffects bloodEffects;
+
+    [Header("Physical Separation")]
+    [Tooltip("Movement here is driven by animation root motion, which bypasses physics " +
+             "entirely -- a Collider on the zombie alone will stop the PLAYER walking into " +
+             "it (CharacterController collides normally), but nothing stops the zombie's " +
+             "root-motion-driven position from walking into the player. This clamps that " +
+             "distance every frame instead.")]
+    public float minSeparationDistance = 0.65f;
+
+    [Header("Wall Collision")]
+    [Tooltip("Same root-motion problem as above, but against walls/level geometry instead " +
+             "of the player: nothing stops root motion from walking straight through a wall " +
+             "collider, so this checks for solid geometry at the candidate position each " +
+             "frame and rejects the move if blocked. Self and player colliders are excluded " +
+             "by identity, not by layer, so the default of Everything is safe to leave as-is.")]
+    public LayerMask wallLayers = ~0;
+    public float wallCheckRadius = 0.3f;
+    public float wallCheckHeight = 0.9f;
+
     [Header("Death -> Crawl")]
     [Tooltip("Delay after death before the headless crawl phase begins")]
-    public float crawlDelayAfterDeath = 5f; 
+    public float crawlDelayAfterDeath = 5f;
     [Tooltip("Movement speed while crawling, headless")]
     public float crawlSpeed = 0.3f;
     [Tooltip("Tag on the crawl animation State in the Animator Controller (State Inspector -> Tag " +
@@ -53,8 +89,20 @@ public class ZombieChase : MonoBehaviour
 
     void Update()
     {
-
         if ((isDead && !isCrawling) || isFrozen || player == null) return;
+
+        // Distance gate: stay idle until the player is close enough to notice.
+        // A crawling zombie skips this check and always keeps hunting.
+        if (!isCrawling)
+        {
+            float distanceToPlayer = Vector3.Distance(transform.position, player.position);
+            if (distanceToPlayer > detectionRange)
+            {
+                if (animator != null) animator.SetFloat("Speed", 0f);
+                agent.ResetPath();
+                return;
+            }
+        }
 
         repathTimer -= Time.deltaTime;
         if (repathTimer <= 0f)
@@ -81,6 +129,8 @@ public class ZombieChase : MonoBehaviour
             if (attackTimer <= 0f)
             {
                 if (animator != null) animator.SetTrigger("Attack");
+                if (zombieAudio != null) zombieAudio.PlayAttack();
+                if (playerHealth != null) playerHealth.TakeDamage(attackDamage);
                 attackTimer = attackCooldown;
             }
         }
@@ -90,13 +140,41 @@ public class ZombieChase : MonoBehaviour
     {
         if (animator == null) return;
         if (isDead && !isCrawling) return;
-        if (isCrawling) return; 
+        if (isCrawling) return;
 
         Vector3 rootMotionPos = animator.rootPosition;
+
+        if (player != null)
+        {
+            Vector3 flatOffset = rootMotionPos - player.position;
+            flatOffset.y = 0f;
+            float flatDist = flatOffset.magnitude;
+            if (flatDist < minSeparationDistance && flatDist > 0.0001f)
+            {
+                Vector3 pushedFlat = flatOffset.normalized * minSeparationDistance;
+                rootMotionPos.x = player.position.x + pushedFlat.x;
+                rootMotionPos.z = player.position.z + pushedFlat.z;
+            }
+        }
+
+        Vector3 checkCenter = rootMotionPos + Vector3.up * wallCheckHeight;
+        Collider[] hits = Physics.OverlapSphere(checkCenter, wallCheckRadius, wallLayers, QueryTriggerInteraction.Ignore);
+        bool blockedByWall = false;
+        foreach (Collider hit in hits)
+        {
+            if (hit.transform == transform || hit.transform.IsChildOf(transform)) continue;
+            if (player != null && (hit.transform == player || hit.transform.IsChildOf(player))) continue;
+            blockedByWall = true;
+            break;
+        }
+        if (blockedByWall)
+        {
+            rootMotionPos = transform.position;
+        }
+
         agent.nextPosition = rootMotionPos;
         transform.position = rootMotionPos;
     }
-
 
     public void Freeze()
     {
@@ -119,6 +197,12 @@ public class ZombieChase : MonoBehaviour
 
         if (animator != null)
             animator.SetTrigger("Die");
+
+        if (zombieAudio != null)
+            zombieAudio.PlayDeathOrTear();
+
+        if (bloodEffects != null)
+            bloodEffects.PlayTearEffects();
 
         StartCoroutine(BeginCrawlAfterDelay());
     }
@@ -148,7 +232,6 @@ public class ZombieChase : MonoBehaviour
             }
             else if (crawlPoseSettleFraction > 0f)
             {
-
                 float startNormalizedTime = animator.GetCurrentAnimatorStateInfo(0).normalizedTime;
                 float settleWaitStart = Time.time;
                 while (animator.GetCurrentAnimatorStateInfo(0).normalizedTime - startNormalizedTime < crawlPoseSettleFraction
@@ -160,14 +243,17 @@ public class ZombieChase : MonoBehaviour
         }
 
         isCrawling = true;
-        isDead = false; 
+        isDead = false;
         agent.Warp(transform.position);
+
+        if (zombieAudio != null)
+            zombieAudio.StartCrawlGroaning();
 
         agent.speed = crawlSpeed;
         agent.stoppingDistance = 0.6f;
         agent.isStopped = false;
-        agent.updatePosition = true; 
-        agent.updateRotation = true; 
+        agent.updatePosition = true;
+        agent.updateRotation = true;
 
         Debug.Log($"[ZombieChase] Crawl started | isOnNavMesh: {agent.isOnNavMesh} | " +
                   $"speed: {agent.speed} | destination: {agent.destination}");
