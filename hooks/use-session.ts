@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-// Visual weight only — reuses the existing timeline dot styles (accent/warning/neutral/active).
+// Visual weight only — maps to the timeline dot colors (danger/warning/muted/success).
 export type SessionEventKind = "accent" | "warning" | "neutral" | "active";
 export type SessionEvent = { time: string; title: string; detail?: string; kind: SessionEventKind };
 
@@ -11,15 +11,12 @@ const MAX_EVENTS = 24;
 
 export function useSession() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [paused, setPaused] = useState(false);
-  const [ended, setEnded] = useState(false);
   const [events, setEvents] = useState<SessionEvent[]>([]);
 
   useEffect(() => {
-    if (paused || ended) return;
     const timer = window.setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
     return () => window.clearInterval(timer);
-  }, [paused, ended]);
+  }, []);
 
   const elapsed = `${pad(Math.floor(elapsedSeconds / 60))}:${pad(elapsedSeconds % 60)}`;
 
@@ -30,13 +27,5 @@ export function useSession() {
     setEvents((prev) => [{ time, title, detail, kind }, ...prev].slice(0, MAX_EVENTS));
   }, []);
 
-  return {
-    elapsed,
-    paused,
-    ended,
-    events,
-    pause: () => setPaused((p) => !p),
-    endSession: () => { setEnded(true); setPaused(true); },
-    logEvent,
-  };
+  return { elapsed, events, logEvent };
 }
