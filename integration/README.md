@@ -19,16 +19,61 @@ Calibration intentionally rejects a run where the squeeze is too close to rest. 
 
 ## Heart rate (MAX30102) and skin response (Grove GSR)
 
-These are wired and streaming to the dashboard now (`heartRate`, `fingerDetected`, `gsr` in the same
-`/state` JSON and WebSocket packets), showing real numbers only — no arousal scoring, baseline,
-or fear-profile logic yet. That's intentional; it gets built in later steps, per the adaptive
-fear engine plan (calibration/arousal, then event tagging, then the fear profile).
+These are wired and streaming to the dashboard (`heartRate`, `fingerDetected`, `gsr` in the same
+`/state` JSON and WebSocket packets). The arousal/fear-profile engine described below consumes
+them; the dashboard's own biometric cards show the raw numbers regardless of whether the engine
+is calibrated.
 
 - Heart rate comes from a simple beat-detector on the MAX30102's IR channel: a slow low-pass
   tracks the "no pulse" baseline, and a beat is counted each time the signal above that baseline
   crosses upward through zero. It's tuned for a live BPM readout, not medical-grade accuracy.
   Reports `0` (and `fingerDetected:false`) until a finger is actually on the sensor.
 - GSR is the Grove sensor's raw analog reading, smoothed with a simple moving average — not yet
-  converted to microsiemens or normalized to a personal baseline.
+  converted to microsiemens; the fear engine normalizes it against your own baseline instead.
 - If the dashboard shows "MAX30102 not detected," check the Serial Monitor at boot and the I2C
   wiring; the firmware keeps running fine without it, heart rate just stays at 0.
+
+## Adaptive fear engine (heart rate + GSR → scripted Unity scares)
+
+Lives in `fear-engine.mjs` (pure scoring logic) wired into `relay-server.mjs` (data source +
+Unity command channel + dashboard broadcast). No LLM, no bandit math — a rolling baseline,
+`arousal = 0.55*HR_rise + 0.45*GSR_response`, a sustained-elevation gate before escalating, and a
+rotate-then-bias picker across three triggers (`footsteps`, `flicker_lights`, `play_scream`) that
+tracks which one actually raises *this* player's arousal.
+
+**Dashboard flow:** the "Live arousal" card gates on consent (a real checkbox action, nothing
+fires without it) → "Start baseline capture" (~45s, sit still) → then shows live arousal,
+state, and the fear-profile bars. `POST /fear/baseline/start` on the relay kicks off capture;
+`fear:state` / `fear:event` over the existing Socket.IO connection drive everything live,
+no polling on the browser side.
+
+**Unity side:** new `FearEngineClient.cs` — **HTTP polling** of `GET /fear/command` via
+`UnityWebRequest` (same proven pattern as `EmgTearGate`), not a WebSocket. On Quest/IL2CPP,
+`System.Net.WebSockets.ClientWebSocket` has a real history of breaking (`PlatformNotSupportedException`);
+given how much of this session went into getting *any* Unity networking reliable on this exact
+device, polling was the safer call. Attach `FearEngineClient` once in the scene (e.g. alongside
+`EmgTearBridge`), set **Command Url** to `http://LAPTOP_WIFI_IP:3001/fear/command`, and it'll find
+`ZombieAudio`/`LightFlicker` automatically if left unassigned.
+
+- `play_footsteps` / `play_scream` → `ZombieAudio.PlayFootstep()` / `PlayScream()` (new). Both
+  now take an optional `intensity` (0-1) that scales playback volume. `PlayScream()` uses a new
+  `scareClips[]` array if you've assigned one, else falls back to `attackClips` — no new audio
+  required to try it.
+- `flicker_lights` → new `LightFlicker.cs`. Drag the scene's tuned Point lights into its
+  `lights` array; it captures their baseline intensity once and always restores it exactly —
+  never a permanent lighting change. `intensity` scales flicker duration and how far the dip
+  goes.
+- If nothing fires: check `/fear/state` on the relay for `calibrated` and `arousal`, and the
+  relay's own terminal for `[fear] ...` log lines (heartbeat-style, prints on every
+  fire/resolve/decay).
+
+**Supabase:** the *browser* does the writes (anonymous sign-in via the anon key, so RLS applies
+as a real user — no service-role key anywhere in this app). See `lib/supabase.ts` and
+`hooks/use-fear-engine.ts`. Table/column names (`game_sessions.player_id/started_at/ended_at/
+consent_given/peak_arousal/session_summary`, `trigger_events.game_session_id/trigger_type/
+fired_at/intensity/arousal_at_fire/response_observed`) are inferred from the spec, not verified
+against the live schema — worth a quick check against the real tables before trusting it
+persists correctly. Writes are all best-effort (try/caught, logged, never break the live
+session) specifically because of that uncertainty. There's also no explicit "end session" button
+anymore, so `game_sessions` gets updated on a 60s interval plus once when the tab is hidden, as
+a stand-in for a real session-end event.

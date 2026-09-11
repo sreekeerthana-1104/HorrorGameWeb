@@ -4,11 +4,14 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Ghost, Gauge, Activity, Radar, ListTree, Clock, HeartPulse, Waves, Hand,
   CheckCircle2, AlertTriangle, Zap, Lock, SlidersHorizontal, Info, X, Plug, Play,
+  ShieldCheck, Hourglass,
 } from "lucide-react";
 import { useSession } from "../hooks/use-session";
 import { useEmgBridge } from "../hooks/use-emg-bridge";
+import { useFearEngine, TRIGGER_IDS, type TriggerId } from "../hooks/use-fear-engine";
 
-const triggerNames = ["Footsteps", "Pursuit", "Darkness", "Shadows", "Isolation"] as const;
+const triggerLabels: Record<TriggerId, string> = { footsteps: "Footsteps", flicker_lights: "Flicker lights", play_scream: "Scream" };
+const arousalTone = (state: "CALM" | "ELEVATED" | "HIGH") => (state === "HIGH" ? "high" : state === "ELEVATED" ? "elevated" : "calm");
 
 const navItems = [
   { id: "overview", label: "Overview", icon: Gauge },
@@ -54,6 +57,7 @@ function Trend({ points, tone }: { points: number[]; tone: "danger" | "warning" 
 export function Dashboard() {
   const session = useSession();
   const emg = useEmgBridge();
+  const fear = useFearEngine({ onEvent: session.logEvent });
   const [showCalibration, setShowCalibration] = useState(true);
   const [activeSection, setActiveSection] = useState<string>("overview");
   const grip = emg.connected ? Math.min(100, Math.round((emg.envelope / Math.max(emg.threshold * 1.45, 1)) * 100)) : 0;
@@ -173,19 +177,43 @@ export function Dashboard() {
           <button className={`btn ${emg.armed ? "armed" : ""}`} onClick={() => setShowCalibration(true)}>{emg.armed ? <CheckCircle2 size={14} /> : <SlidersHorizontal size={14} />}{emg.armed ? "Live signal is armed" : "Open EMG calibration"}</button>
         </article>
 
-        <article className="card panel-card inactive">
-          <p className="eyebrow">Live arousal</p>
-          <div className="arousal-face"><span className="arousal-value">—<span>/ 100</span></span><span className="arousal-orb"><Lock size={14} /></span></div>
-          <div className="meter"><i style={{ width: "0%" }} /></div>
-          <p className="panel-note"><Info size={13} />Wire up baseline calibration + HR/GSR weighting to activate this panel.</p>
-        </article>
+        {!fear.consentGiven ? (
+          <article className="card panel-card inactive">
+            <p className="eyebrow">Live arousal</p>
+            <div className="ability-row">
+              <span className="ability-icon idle"><ShieldCheck size={18} /></span>
+              <div><strong>Enable biometric monitoring</strong><p>Turns on real-time arousal scoring from heart rate + skin response. Nothing is recorded without this.</p></div>
+            </div>
+            <button className="btn" onClick={fear.giveConsent}><ShieldCheck size={14} />I consent — start monitoring</button>
+          </article>
+        ) : !fear.calibrated ? (
+          <article className="card panel-card inactive">
+            <p className="eyebrow">Live arousal</p>
+            <div className="ability-row">
+              <span className="ability-icon idle"><Hourglass size={18} /></span>
+              <div><strong>{fear.calibrationPhase === "collecting" ? `Capturing baseline — ${Math.ceil(fear.calibrationRemaining)}s` : "Baseline required"}</strong><p>{fear.calibrationPhase === "collecting" ? "Sit still and relax — this only needs to happen once." : "Captures ~45s of calm heart rate + GSR before arousal scoring can start."}</p></div>
+            </div>
+            <button className="btn" onClick={fear.startBaseline} disabled={fear.baselinePending || fear.calibrationPhase === "collecting"}><Play size={14} />{fear.calibrationPhase === "collecting" ? "Capturing…" : "Start baseline capture"}</button>
+          </article>
+        ) : (
+          <article className="card panel-card">
+            <p className="eyebrow">Live arousal</p>
+            <div className="arousal-face">
+              <span className="arousal-value live">{fear.arousal}<span>/ 100</span></span>
+              <span className={`arousal-orb ${arousalTone(fear.arousalState)}`}><Activity size={14} /></span>
+            </div>
+            <b className={`state ${arousalTone(fear.arousalState)}`}>{fear.arousalState}</b>
+            <div className={`meter ${arousalTone(fear.arousalState)}`}><i style={{ width: `${fear.arousal}%` }} /></div>
+            <p className="panel-note"><Info size={13} />Peak this session: {fear.peakArousal}/100{fear.peakArousalTrigger ? ` on ${triggerLabels[fear.peakArousalTrigger]}` : ""} · {fear.totalFires} scares fired</p>
+          </article>
+        )}
       </section>
 
       <section className="grid-2">
-        <article className="card panel-card inactive" id="profile">
-          <div className="panel-card__head"><div><p className="eyebrow">Learned response profile</p><h2>What is working</h2></div><span className="badge idle">NOT ACTIVE</span></div>
-          <div className="profile-bars">{triggerNames.map((name) => <div className="profile-row" key={name}><span>{name}</span><div><i style={{ width: "0%" }} /></div><b>—</b></div>)}</div>
-          <p className="panel-note"><Info size={13} />Scores populate once Unity tags game beats and the web engine scores them.</p>
+        <article className={`card panel-card ${fear.calibrated ? "" : "inactive"}`} id="profile">
+          <div className="panel-card__head"><div><p className="eyebrow">Learned response profile</p><h2>What is working</h2></div><span className={`badge ${fear.calibrated ? "live" : "idle"}`}>{fear.calibrated ? "LIVE" : "NOT ACTIVE"}</span></div>
+          <div className="profile-bars">{TRIGGER_IDS.map((id) => <div className={`profile-row ${fear.calibrated ? "live" : ""}`} key={id}><span>{triggerLabels[id]}</span><div><i style={{ width: `${fear.calibrated ? Math.round(fear.triggerScores[id] * 100) : 0}%` }} /></div><b>{fear.calibrated ? fear.triggerScores[id].toFixed(2) : "—"}</b></div>)}</div>
+          <p className="panel-note"><Info size={13} />{fear.calibrated ? "Rotates through all three triggers, then favors whichever is raising your arousal." : "Scores populate once baseline calibration completes and triggers start firing."}</p>
         </article>
 
         <article className="card panel-card" id="events">

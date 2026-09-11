@@ -26,6 +26,10 @@ public class ZombieAudio : MonoBehaviour
     public AudioClip[] deathOrTearClips;
     public AudioClip[] crawlGroanClips;
     public AudioClip breathingLoop;
+    [Tooltip("Dedicated scare/scream stinger for the fear engine's play_scream action. " +
+             "Leave empty to fall back to Attack Clips — you don't need to source new " +
+             "audio just to try the trigger out.")]
+    public AudioClip[] scareClips;
 
     [Header("Variation")]
     [Tooltip("Random pitch offset applied on every one-shot play, +/- this fraction. " +
@@ -62,14 +66,22 @@ public class ZombieAudio : MonoBehaviour
         }
     }
 
-    /// <summary>Call from an Animation Event on foot-plant frames of the Walk clip.</summary>
-    public void PlayFootstep() => PlayRandom(footstepClips);
+    /// <summary>Call from an Animation Event on foot-plant frames of the Walk clip, or
+    /// externally (e.g. the fear engine's play_footsteps action) for an ambient/off-screen
+    /// footstep stinger. intensity (0-1) scales playback volume; default is full volume so
+    /// existing no-argument calls behave exactly as before.</summary>
+    public void PlayFootstep(float intensity = 1f) => PlayRandom(footstepClips, intensity);
 
     /// <summary>Call alongside animator.SetTrigger("Attack") in ZombieChase.</summary>
     public void PlayAttack() => PlayRandom(attackClips);
 
     /// <summary>Call from ZombieChase.Die() -- covers the head-tear/death moment.</summary>
     public void PlayDeathOrTear() => PlayRandom(deathOrTearClips);
+
+    /// <summary>Fear engine's play_scream action. Uses Scare Clips if you've assigned any,
+    /// otherwise falls back to Attack Clips so the trigger works without new audio assets.
+    /// intensity (0-1) scales playback volume.</summary>
+    public void PlayScream(float intensity = 1f) => PlayRandom(scareClips != null && scareClips.Length > 0 ? scareClips : attackClips, intensity);
 
     /// <summary>Call once when crawl movement actually begins; starts periodic groaning.</summary>
     public void StartCrawlGroaning()
@@ -83,11 +95,11 @@ public class ZombieAudio : MonoBehaviour
         nextCrawlGroanTime = Time.time + Random.Range(crawlGroanIntervalRange.x, crawlGroanIntervalRange.y);
     }
 
-    private void PlayRandom(AudioClip[] clips)
+    private void PlayRandom(AudioClip[] clips, float volumeScale = 1f)
     {
         if (clips == null || clips.Length == 0 || voiceSource == null) return;
         AudioClip clip = clips[Random.Range(0, clips.Length)];
         voiceSource.pitch = 1f + Random.Range(-pitchVariance, pitchVariance);
-        voiceSource.PlayOneShot(clip);
+        voiceSource.PlayOneShot(clip, Mathf.Clamp01(volumeScale));
     }
 }

@@ -44,7 +44,7 @@ export type EmgBridge = {
   gsrTrend: number[];
 };
 
-const defaultAddress = "ws://192.168.1.50/ws";
+const defaultAddress = "ws://172.20.10.2/ws";
 
 export function useEmgBridge(): EmgBridge {
   const [address, setAddress] = useState(defaultAddress);
